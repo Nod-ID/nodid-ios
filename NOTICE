@@ -1,0 +1,19 @@
+Nod ID iOS SDK (NodIDKit)
+Copyright 2026 Tana Contracting LLC
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). This applies to the Swift source and equally to the prebuilt
+MoproBindings.xcframework released with each version.
+
+This product includes software developed by others:
+
+- NFCPassportReader 2.3.3, Copyright (c) 2019 Andy Qua, MIT License (see NFCPassportReader-LICENSE).
+- OpenSSL-Package (OpenSSL 3.x for Swift Package Manager), Apache License 2.0.
+- Barretenberg (Aztec Protocol), Apache License 2.0: the UltraHonk proving system.
+- Noir (Noir Lang) and noir-rs (zkMopro), Apache License 2.0 (see noir-rs-LICENSE).
+- Mopro (zkMopro), MIT OR Apache-2.0.
+- TACEO oprf-core, MIT OR Apache-2.0.
+- uniffi (Mozilla), MPL-2.0; im, bitmaps and sized-chunks, MPL-2.0+. These are used unmodified, and their source is available from the
+  crates.io pages listed in THIRD_PARTY_LICENSES.md.
+- Other Rust crates, each under its own licence: see THIRD_PARTY_LICENSES.md.
+
+The MoproBindings.xcframework contains the Nod ID proving core compiled together with the components above.
