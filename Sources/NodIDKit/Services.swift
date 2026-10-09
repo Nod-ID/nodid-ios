@@ -1,7 +1,7 @@
 // Nod ID SDK: the contract between the screens and the machinery behind them (M2).
 // The screens and the flow state machine (UI side) only talk to `NodIDServices`. The real implementation (chip read, proving,
 // network) is written separately; `MockServices` lets the whole flow run without a passport.
-// RULES (CLAUDE.md): passport data (MRZ values, DG1, SOD) lives in memory only, is never logged, never printed, never persisted,
+// RULES: passport data (MRZ values, DG1, SOD) lives in memory only, is never logged, never printed, never persisted,
 // and is wiped (overwritten) after the proof. Nothing in this file may print or store it.
 import Foundation
 

@@ -4,7 +4,7 @@ import DeviceCheck
 import Security
 
 /// The SDK version the verifier records with each proof. `scripts/sdk-release.sh` refuses to build a release whose version differs.
-enum NodIDVersion { static let sdk = "0.2.0" }
+enum NodIDVersion { static let sdk = "0.2.1" }
 
 /// App Attest on every passport proof (docs/RESULT_AND_ATTESTATION.md section 2, decision 48).
 /// The SDK attests a key once per install (the attestation travels with the first proof) and signs an assertion over

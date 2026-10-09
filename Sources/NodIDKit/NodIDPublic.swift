@@ -3,7 +3,7 @@
 import SwiftUI
 import UIKit
 
-/// The ONLY thing the host app learns. Never a reason (rule 7 in CLAUDE.md).
+/// The ONLY thing the host app learns. Never a reason.
 public enum NodIDOutcome { case verified, notVerified, cancelled, technicalError }
 
 /// Host-app integration notes.

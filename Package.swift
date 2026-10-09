@@ -8,11 +8,11 @@ let package = Package(
     platforms: [.iOS(.v17)],
     products: [.library(name: "NodIDKit", targets: ["NodIDKit"])],
     dependencies: [
-        // Pinned exactly (CLAUDE.md rule 10). Its OpenSSL dependency is pinned by this package's Package.resolved.
+        // Pinned exactly (we never change third-party cryptography). Its OpenSSL dependency is pinned by this package's Package.resolved.
         .package(url: "https://github.com/AndyQ/NFCPassportReader", exact: "2.3.3"),
     ],
     targets: [
-        .binaryTarget(name: "MoproBindings", url: "https://github.com/Nod-ID/nodid-ios/releases/download/0.2.0/MoproBindings.xcframework.zip", checksum: "71b8daf1bb8bf6fc7e319141e13daabc39f9a139155fcad28198546c025d76df"),
+        .binaryTarget(name: "MoproBindings", url: "https://github.com/Nod-ID/nodid-ios/releases/download/0.2.1/MoproBindings.xcframework.zip", checksum: "acea7ec34688af70502a3dfe92dda98de34d99708e917b315238734f56e64bb3"),
         .target(
             name: "NodIDKit",
             dependencies: ["MoproBindings", .product(name: "NFCPassportReader", package: "NFCPassportReader")],

@@ -1,5 +1,5 @@
 // Nod ID SDK: the real services behind the screens (M2). Chip read over NFC, the OPRF call, proving on the phone, and the proof upload.
-// RULES (CLAUDE.md): passport bytes stay in memory only. Nothing here prints, logs or stores them; the URL session is ephemeral (no disk cache,
+// RULES: passport bytes stay in memory only. Nothing here prints, logs or stores them; the URL session is ephemeral (no disk cache,
 // no cookies); chip data is overwritten as soon as the Rust side holds it; the Rust session is wiped when this returns or throws.
 import Foundation
 import NFCPassportReader
