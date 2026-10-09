@@ -21,6 +21,8 @@ It returns at once and downloads in the background: the shared files plus the ci
 
 To ship the files inside your app instead (no download), add the resources folder from the release to your app target as a **group**, not a folder reference, so the files sit flat; or pass `RealServices(resources: url)`. Development builds of the package (this repository) expect the bundled folder.
 
+**3b. Turn on App Attest (SDK 0.2.0 and later).** Every proof is signed with an Apple App Attest assertion that shows it came from your genuine app. In Xcode, Signing & Capabilities, add **App Attest** (entitlement `com.apple.developer.devicecheck.appattest-environment`; Xcode sets `development` for debug builds and `production` for App Store and TestFlight builds). Then, in the dashboard, open your app's Checks page and add your App ID under **App Attest**, written `TEAMID.bundle.id` (Team ID from your Apple Developer account, for example `ABCDE12345.com.example.haven`). Apps start in **test mode**, where App Attest may be skipped and development builds are accepted. When your released app has the capability, turn test mode off: from then on a verification without a valid App Attest check comes back as `not_verified`, and development-signed builds no longer verify. The SDK attests once per install (about 1.5 s, done beside the proving) and signs each proof in about 30 ms. It works only on a real iPhone. A reinstall or a restored device makes a new key by itself. SDK 0.1.x does not send App Attest; the verifier accepts it for a limited time that we announce, and records it in the evidence log as `legacy`.
+
 **4. Stop the OS saving screens.** Two lines in your `UIApplicationDelegate` (SwiftUI: `@UIApplicationDelegateAdaptor`):
 ```swift
 func application(_ a: UIApplication, shouldSaveSecureApplicationState c: NSCoder) -> Bool { NodID.disableStateRestoration() }
@@ -48,9 +50,19 @@ The app learns only the outcome. Reasons (under age, country, expired, already u
 **7. Confirm on your backend before you trust it.**
 ```
 GET https://api.nodid.app/v1/sessions/<sessionId>/result    Authorization: Bearer <your secret key>
--> {"outcome":"verified","personCode":"...","versions":{...}}     (202 while pending)
+-> {"outcome":"verified","assurance":"substantial","unique":true,"personCode":"...","method":"passport_nfc",
+    "versions":{"circuit":"...","vk":"...","dscTree":"...","sdk":"0.2.0"}}     (202 while pending)
 ```
+- `outcome`: `verified`, `not_verified`, `cancelled` or `technical_error`.
+- `assurance`: how sure the method makes us. `substantial` for a passport proof today; `high` (passport and face match) and `basic` (an OS age signal or estimation) come with those methods. Only present when verified.
+- `unique`: `true` only for passport methods. `personCode` is present only when `unique` is `true`.
+- `method`: `passport_nfc` today.
+- `versions`: the circuit, key, certificate-tree and SDK versions that made the result. Keep them with the result.
+- In the dashboard you can set a **minimum assurance** and whether a **unique person is required**, per app. A result below your minimum comes back as `not_verified`, with no reason.
+
 `personCode` is stable for the same person in your app and cannot be matched across other apps. Use it for one-account-per-person.
+
+**Evidence log.** The dashboard's Evidence tab shows one entry per verification (time, method, versions, assurance, outcome, App Attest result, a hash of the proofs), each chained to the one before. Export it as JSON or CSV and verify the chain there or yourself (the hash definition is in the tab). Entries hold no country, identity data, address or person code. Kept 13 months.
 
 **What you configure per app** (name, accent colour, minimum age, expiry and country checks, country list, help link, digital ID on/off, other ways to prove): in the dashboard at dashboard.nodid.app. Sign in with your email (no password), create an app, set the checks, create a secret key (shown once), and use **Run a test verification** to get a test session id; paste it into the Sample app (or pass it to `NodIDVerifyView`) and the dashboard shows the outcome. Usage shows counts of the four outcomes only.
 

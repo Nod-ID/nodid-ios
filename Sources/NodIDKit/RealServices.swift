@@ -30,6 +30,7 @@ public final class RealServices: NodIDServices {
     private let download: (dir: URL, base: URL, pin: String)?
     private let gate = ResourceGate.shared
     private var policyJSON: Data?
+    private let attest = AppAttest()
     /// File-name prefix of the bundled CSCA files (`<prefix>-certs.bin`, `-leaves.txt`, `-root.txt`). Only the synthetic self-test changes it.
     @_spi(Testing) public var cscaPrefix = "csca"
     /// Called with the proof upload body before it is sent (self-test only; the body holds proofs and public outputs, no passport data).
@@ -178,6 +179,9 @@ public final class RealServices: NodIDServices {
     // MARK: prove
     public func prove(chip: ChipHandle, sessionId: String, onStep: @escaping (ProofStep) -> Void) async throws -> ProofResult {
         guard let c = chip as? RealChip, let pj = policyJSON else { throw ServicesError.session }
+        // App Attest: the key and, the first time, its attestation are made beside the proving (about 1.5 s once per install).
+        let nonce = ((try? JSONSerialization.jsonObject(with: pj)) as? [String: Any])?["nonce"].flatMap { $0 as? String }.flatMap(AttestBody.unhex)
+        let attestation = Task { if let n = nonce { await attest.prepare(nonce: n) } }
         onStep(.passportRead)
         let ps: ProofSession
         do { ps = try ProofSession(policyJson: pj, sod: Data(c.sod), dg1: Data(c.dg1)) } catch { c.wipe(); throw error }
@@ -228,10 +232,18 @@ public final class RealServices: NodIDServices {
         try Task.checkCancellation()
         proofObserver?(body)
 
+        _ = await attestation.value
+        var signed = body
+        if let n = nonce, let parts = AttestBody.parse(body) {
+            let payload = await attest.sign(nonce: n, path: parts.path, proofs: parts.proofs, sdk: NodIDVersion.sdk)
+            NodTrace.log("prove: app attest \(payload == nil ? "not available" : payload?.attestation == nil ? "assertion" : "attestation and assertion")")
+            signed = AttestBody.add(to: body, sdk: NodIDVersion.sdk, attest: payload)
+        }
         let tUp = CFAbsoluteTimeGetCurrent()
-        let (out, status) = try await post(api.appendingPathComponent("v1/sessions/\(sessionId)/proof"), body: Data(body.utf8), type: "application/json")
-        lastTimings += String(format: ", upload %.2f s (%d B)", CFAbsoluteTimeGetCurrent() - tUp, body.utf8.count)
+        let (out, status) = try await post(api.appendingPathComponent("v1/sessions/\(sessionId)/proof"), body: Data(signed.utf8), type: "application/json")
+        lastTimings += String(format: ", upload %.2f s (%d B)", CFAbsoluteTimeGetCurrent() - tUp, signed.utf8.count)
         guard status == 200, let j = try JSONSerialization.jsonObject(with: out) as? [String: Any], let outcome = j["outcome"] as? String else { throw ServicesError.badAnswer }
+        if outcome == "verified" { await attest.markAttested() }
         return outcome == "verified" ? .verified(reference: RealServices.reference()) : .notVerified(.technical)
     }
 
