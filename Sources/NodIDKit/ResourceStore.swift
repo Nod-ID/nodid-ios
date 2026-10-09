@@ -5,6 +5,12 @@
 import Foundation
 import CryptoKit
 
+/// Opt-in progress trace for test apps (stage names, file names of the shared files, byte counts). Off unless a host sets `sink`. Never carries passport data.
+enum NodTrace {
+    nonisolated(unsafe) static var sink: ((String) -> Void)?
+    static func log(_ s: @autoclosure () -> String) { sink?(s()) }
+}
+
 /// `tier` groups the files: "base" (shared by every passport: the SRS, keys, CSCA data), "common" (the circuits most passports need, fetched ahead of time
 /// by `NodID.prefetch`), "extra" (the other circuits, fetched only when a passport needs one). No tier means "base".
 struct ResourceFile: Codable, Equatable { let name: String; let size: Int; let sha256: String; var tier: String? = nil }
@@ -108,6 +114,7 @@ struct ResourceStore {
         }
         todo.sort { $0.size > $1.size }
         let total = max(1, todo.reduce(0) { $0 + $1.size })
+        NodTrace.log("ensure: \(todo.count) files, \(total) bytes to get (parallel \(parallel))")
         let counter = ByteCounter(total: total, report: progress)
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -129,6 +136,7 @@ struct ResourceStore {
         let fm = FileManager.default
         let target = directory.appendingPathComponent(f.name), tmp = directory.appendingPathComponent(f.name + ".part")
         var attempt = 0
+        NodTrace.log("file start \(f.name) \(f.size) B")
         while true {
             let resume = attempt == 0 && ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int ?? 0) > 0
             if !resume { try? fm.removeItem(at: tmp) }
@@ -142,13 +150,14 @@ struct ResourceStore {
         try? fm.removeItem(at: target)
         try fm.moveItem(at: tmp, to: target)
         counter.set(f.name, f.size)
+        NodTrace.log("file done \(f.name)")
     }
 
     /// Fetches one file from the first host that answers. Stops at once when the task is cancelled.
     private func fetchAny(_ name: String, to file: URL, resume: Bool, progress: @escaping (Int64) -> Void) async throws {
         for base in [baseURL] + fallbackURLs {
             do { try await fetcher.fetch(base.appendingPathComponent(name), to: file, resume: resume, progress: progress); return }
-            catch { if Task.isCancelled || error is CancellationError { throw CancellationError() } }
+            catch { NodTrace.log("fetch \(name) from \(base.host ?? "?") failed: \(error)"); if Task.isCancelled || error is CancellationError { throw CancellationError() } }
         }
         throw ResourceError.network
     }
@@ -247,7 +256,7 @@ private final class ChunkReceiver: NSObject, URLSessionDataDelegate, @unchecked 
 
 /// Set by the release script (`scripts/sdk-resources.sh`) when it prepares a download release; nil in development builds.
 enum PinnedResources {
-    static let manifestSHA256: String? = "364fd29c074086b7d6e4045748e3cd5930f78eaf26a529956259541d29b5ecaa"
-    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.1.2/")
-    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.2/")!]
+    static let manifestSHA256: String? = "c0075de1a8b3777ad264d2f94a2b1000d1f5e10010f060c9bb1750f9fbc54142"
+    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.1.3/")
+    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.3/")!]
 }

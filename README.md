@@ -56,5 +56,11 @@ GET https://api.nodid.app/v1/sessions/<sessionId>/result    Authorization: Beare
 
 **Limits today.** Device only (no simulator). Passports whose signing certificates are larger than 2,048 bytes, or from countries not yet in the coverage table (`docs/COUNTRY_COVERAGE.md`), show the member a clear "can't accept this passport yet" screen. "Verify with Wallet" is shown only when your app has it switched on, and does nothing until Apple approves us for it.
 
+**8. Treat the person code as a "likely same person" signal.** The person code is stable for the same name (as printed in the passport's machine-readable zone), date of birth and nationality, and is different for every app of yours. It is not proof of identity, and two different people can, rarely, share one (same name, birth date and nationality). So:
+- When a code you already hold comes back for a new account, **do not ban and do not merge automatically.** Show a soft message ("This person may already have an account") and offer **contact support** or **link accounts**. A person wrongly locked out is a worse outcome than a rare duplicate.
+- The code **changes** when the name on the passport changes (marriage, legal change, different spelling or transliteration, a middle name added or dropped) or the nationality changes. A renewed passport with the same details gives the same code. Someone holding passports from two countries gets two codes.
+- **Re-verify and link** (for a name change, or a second passport): let a signed-in member verify again from inside their account, and when the new code differs from the one you stored for them, store it as a second code for the same member instead of treating it as a new person. Do this only from an authenticated session, and still route a code that matches a *different* member to support.
+- Store person codes like any other personal data (they identify a person within your app). They are never linkable to another customer's.
+
 ## Licence
 Apache-2.0 (see LICENSE and NOTICE). Third-party components are listed in `legal/THIRD_PARTY_LICENSES.md`. Pilot software: external audit pending; country coverage is partial.

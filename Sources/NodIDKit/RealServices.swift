@@ -80,7 +80,8 @@ public final class RealServices: NodIDServices {
     static func prefetch(allowCellular: Bool) {
         guard let d = downloadConfig() else { return }
         let store = makeStore(d, allowExpensive: allowCellular, waitForConnectivity: true)
-        guard !store.isComplete(tiers: prefetchTiers) else { return }
+        guard !store.isComplete(tiers: prefetchTiers) else { NodTrace.log("prefetch: nothing to do"); return }
+        NodTrace.log("prefetch: starting (cellular \(allowCellular))")
         PrefetchState.shared.start(allowCellular: allowCellular) {
             try? await ResourceGate.shared.run { try await store.ensure(tiers: prefetchTiers) { ResourceProgress.shared.publish($0) } }
         }
@@ -90,6 +91,7 @@ public final class RealServices: NodIDServices {
     public func resourcesReady(progress: @escaping (Int) -> Void) async throws {
         guard let cheap = resourceStore(allowExpensive: false), let any = resourceStore(allowExpensive: true) else { return }
         if cheap.isComplete(tiers: baseTiers) { return }
+        NodTrace.log("resourcesReady: shared files missing, starting download")
         PrefetchState.shared.stopWifiOnly()      // the member is waiting now: finish over any network (partial files are kept)
         let id = ResourceProgress.shared.observe(progress)
         defer { ResourceProgress.shared.remove(id) }
@@ -101,7 +103,8 @@ public final class RealServices: NodIDServices {
     func circuitsReady(names: [String]) async throws {
         guard let any = resourceStore(allowExpensive: true) else { return }
         let files = Set(names.map { $0 + ".json" })
-        if any.isComplete(names: files) { return }
+        if any.isComplete(names: files) { NodTrace.log("circuitsReady: \(files.count) circuit files already on the phone"); return }
+        NodTrace.log("circuitsReady: \(files.count) circuit files to get")
         PrefetchState.shared.stopWifiOnly()
         try await gate.run { try await any.ensure(names: files) { ResourceProgress.shared.publish($0) } }
     }
@@ -192,12 +195,14 @@ public final class RealServices: NodIDServices {
             }
         }
         // OPRF: a fixed-size request, then the answer, checked against the key the session pins.
+        NodTrace.log("prove: oprf request")
         let request = try ps.oprfRequest()
         async let answer = post(oprf.appendingPathComponent("v1/oprf"), body: request, type: "application/octet-stream")
         async let pk = get(oprf.appendingPathComponent("v1/public-key"))
         let (ans, ansStatus) = try await answer
         let (pubkey, pkStatus) = try await pk
         guard ansStatus == 200, ans.count == 128, pkStatus == 200, pubkey.count == 64 else { throw ServicesError.badAnswer }
+        NodTrace.log("prove: oprf done")
         try ps.oprfComplete(response: ans, publicKey: pubkey)
         try Task.checkCancellation()
 
@@ -210,6 +215,7 @@ public final class RealServices: NodIDServices {
         let circuitNames = try await Task.detached(priority: .userInitiated) {
             try sessionBox.prepare(certsPath: res + "/\(prefix)-certs.bin", leavesPath: res + "/\(prefix)-leaves.txt", rootHex: rootText, served: served)
         }.value
+        NodTrace.log("prove: prepared (\(circuitNames.count) circuits)")
         try await circuitsReady(names: circuitNames)      // only the circuits this passport needs
         try Task.checkCancellation()
 
@@ -237,6 +243,7 @@ public final class RealServices: NodIDServices {
 
     // MARK: network
     public func warmUp() async {
+        NodTrace.log("warmUp: start")
         // First open after install: fetch the resources in the background (not over mobile data; proving fetches them anyway if still missing).
         if let cheap = resourceStore(allowExpensive: false), !cheap.isComplete(tiers: prefetchTiers) { try? await gate.run { try await cheap.ensure(tiers: prefetchTiers) { ResourceProgress.shared.publish($0) } } }
         let path = resources + "/nodid.srs"
@@ -271,6 +278,7 @@ actor ResourceGate {
     static let shared = ResourceGate()
     private var running: Task<Void, Error>?
     func run(_ work: @escaping @Sendable () async throws -> Void) async throws {
+        if running != nil { NodTrace.log("gate: waiting for another download") }
         while let t = running { _ = try? await t.value }
         try Task.checkCancellation()
         let t = Task { try await work() }
@@ -294,6 +302,7 @@ final class ResourceProgress: @unchecked Sendable {
     func remove(_ id: UUID) { lock.lock(); observers[id] = nil; lock.unlock() }
     func publish(_ fraction: Double) {
         let p = max(0, min(100, Int(fraction * 100)))
+        if p % 10 == 0 { NodTrace.log("progress \(p)%") }
         lock.lock()
         guard p != percent else { lock.unlock(); return }
         percent = fraction >= 1 ? nil : p

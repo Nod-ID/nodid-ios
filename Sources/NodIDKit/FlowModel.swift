@@ -346,6 +346,7 @@ final class NodIDFlowModel {
     private func startProving() {
         guard let handle = chip else { go(.failure(.technical)); return }
         go(.proving)
+        NodTrace.log("flow: proving started")
         provingLong = false; proofStep = .passportRead
         longTask?.cancel()
         longTask = Task { [weak self] in
