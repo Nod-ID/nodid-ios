@@ -9,7 +9,17 @@ Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator
 - Signing & Capabilities: add **Near Field Communication Tag Reading**. Entitlement `com.apple.developer.nfc.readersession.formats` = `TAG`.
 - Info.plist: `NFCReaderUsageDescription`, `NSCameraUsageDescription` (your own words, say it stays on the phone), and `com.apple.developer.nfc.readersession.iso7816.select-identifiers` = `A0000002471001`, `A0000002472001`, `00000000000000`.
 
-**3. Proving resources (circuits, keys, SRS, CSCA files; about 135 MB).** Release builds of the package download them once, the first time the member opens the flow, into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. The first open starts the download in the background (not over mobile data); if it is not done when proving starts, the member sees "Getting ready for the first time" with a percentage. Nothing about the member is uploaded. Nothing for you to do. To ship the files inside your app instead (no download), add the resources folder from the release to your app target as a **group**, not a folder reference, so the files sit flat; or pass `RealServices(resources: url)`. Development builds of the package (this repository) expect the bundled folder.
+**3. Proving resources (circuits, keys, SRS, CSCA files; about 135 MB).** Release builds of the package download them once into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. Files come from `nodid.app/sdk/<version>/` and, if that is unreachable, from the GitHub release. A stopped download continues where it stopped. Nothing about the member is uploaded.
+
+**Call `NodID.prefetch()` at app launch** so the files are ready before a member ever opens the flow:
+```swift
+// in application(_:didFinishLaunchingWithOptions:) or your App's init
+NodID.prefetch()                      // waits for Wi-Fi (default)
+// NodID.prefetch(allowCellular: true) // also over mobile data
+```
+It returns at once and downloads in the background; it does nothing when the files are already on the phone. If the app is closed first, the next launch continues. If a member opens the flow before it finishes, the flow completes the download over any network and shows "Getting ready for the first time" with a percentage that follows the bytes. Without `prefetch()`, the flow starts the download when it opens (Wi-Fi only until the proof needs it).
+
+To ship the files inside your app instead (no download), add the resources folder from the release to your app target as a **group**, not a folder reference, so the files sit flat; or pass `RealServices(resources: url)`. Development builds of the package (this repository) expect the bundled folder.
 
 **4. Stop the OS saving screens.** Two lines in your `UIApplicationDelegate` (SwiftUI: `@UIApplicationDelegateAdaptor`):
 ```swift

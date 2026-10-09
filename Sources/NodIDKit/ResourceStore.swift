@@ -18,8 +18,9 @@ enum ResourceError: Error, Equatable {
 }
 
 /// Gets one URL into a file. The real one uses URLSession; the test one copies from a folder.
+/// With `resume: true` and a partial file already there, it asks only for the rest. `progress` gets the bytes now in the file.
 protocol ResourceFetcher {
-    func fetch(_ url: URL, to file: URL, progress: @escaping (Int64) -> Void) async throws
+    func fetch(_ url: URL, to file: URL, resume: Bool, progress: @escaping (Int64) -> Void) async throws
 }
 
 struct ResourceStore {
@@ -27,6 +28,8 @@ struct ResourceStore {
     let baseURL: URL
     let pinnedManifestSHA256: String
     let fetcher: ResourceFetcher
+    /// Tried in order when `baseURL` cannot be reached. The pinned hashes are checked the same way whichever host answered.
+    var fallbackURLs: [URL] = []
 
     static func sha256(of url: URL) throws -> String {
         let h = try FileHandle(forReadingFrom: url)
@@ -54,6 +57,15 @@ struct ResourceStore {
         }
     }
 
+    /// Fetches one file from the first host that answers. Stops at once when the task is cancelled.
+    private func fetchAny(_ name: String, to file: URL, resume: Bool, progress: @escaping (Int64) -> Void) async throws {
+        for base in [baseURL] + fallbackURLs {
+            do { try await fetcher.fetch(base.appendingPathComponent(name), to: file, resume: resume, progress: progress); return }
+            catch { if Task.isCancelled || error is CancellationError { throw CancellationError() } }
+        }
+        throw ResourceError.network
+    }
+
     private func sha256Hex(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
 
     /// Makes the folder complete and returns it. Files already there and correct are kept. `progress` is 0...1 over all the bytes still to get.
@@ -68,7 +80,7 @@ struct ResourceStore {
         let manifestFile = directory.appendingPathComponent("manifest.json")
         let part = directory.appendingPathComponent("manifest.json.part")
         try? fm.removeItem(at: part)
-        do { try await fetcher.fetch(baseURL.appendingPathComponent("manifest.json"), to: part, progress: { _ in }) } catch { throw ResourceError.network }
+        try await fetchAny("manifest.json", to: part, resume: false, progress: { _ in })
         guard try Self.sha256(of: part) == pinnedManifestSHA256 else { try? fm.removeItem(at: part); throw ResourceError.manifestMismatch }
         let manifestData = try Data(contentsOf: part)
         guard let manifest = try? JSONDecoder().decode(ResourceManifest.self, from: manifestData), !manifest.files.isEmpty else { throw ResourceError.badManifest }
@@ -85,12 +97,17 @@ struct ResourceStore {
         var done = 0
         for f in todo {
             let target = directory.appendingPathComponent(f.name), tmp = directory.appendingPathComponent(f.name + ".part")
-            try? fm.removeItem(at: tmp)
-            let before = done
-            do { try await fetcher.fetch(baseURL.appendingPathComponent(f.name), to: tmp, progress: { got in progress(Double(before + Int(got)) / Double(total)) }) }
-            catch { throw ResourceError.network }
-            guard (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int == f.size, try Self.sha256(of: tmp) == f.sha256 else {
-                try? fm.removeItem(at: tmp); throw ResourceError.fileMismatch(f.name)
+            // A partial file from an interrupted run is continued; if the finished file does not match, it is fetched again from the start, once.
+            var attempt = 0
+            while true {
+                let resume = attempt == 0 && ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int ?? 0) > 0
+                if !resume { try? fm.removeItem(at: tmp) }
+                let before = done
+                try await fetchAny(f.name, to: tmp, resume: resume, progress: { got in progress(min(1, Double(before + Int(got)) / Double(total))) })
+                if (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int == f.size, try Self.sha256(of: tmp) == f.sha256 { break }
+                try? fm.removeItem(at: tmp)
+                attempt += 1
+                if attempt > 1 { throw ResourceError.fileMismatch(f.name) }
             }
             try? fm.removeItem(at: target)
             try fm.moveItem(at: tmp, to: target)
@@ -105,25 +122,87 @@ struct ResourceStore {
     }
 }
 
-/// The real fetcher. `allowExpensive: false` keeps the early background start off mobile data.
+/// The real fetcher. Streams to the file in chunks, so progress follows the bytes as they arrive, and a stopped download can continue
+/// (HTTP Range) instead of starting again. `allowExpensive: false` keeps it off mobile data; `waitForConnectivity` makes it wait for Wi-Fi
+/// instead of failing.
 struct URLSessionFetcher: ResourceFetcher {
     let allowExpensive: Bool
-    func fetch(_ url: URL, to file: URL, progress: @escaping (Int64) -> Void) async throws {
+    var waitForConnectivity = false
+
+    func fetch(_ url: URL, to file: URL, resume: Bool, progress: @escaping (Int64) -> Void) async throws {
         let c = URLSessionConfiguration.ephemeral
         c.urlCache = nil; c.requestCachePolicy = .reloadIgnoringLocalCacheData; c.httpCookieStorage = nil; c.httpShouldSetCookies = false
-        c.allowsExpensiveNetworkAccess = allowExpensive; c.timeoutIntervalForRequest = 30; c.waitsForConnectivity = false
-        let session = URLSession(configuration: c)
+        c.allowsExpensiveNetworkAccess = allowExpensive; c.allowsConstrainedNetworkAccess = allowExpensive
+        c.waitsForConnectivity = waitForConnectivity
+        c.timeoutIntervalForRequest = 30; c.timeoutIntervalForResource = waitForConnectivity ? 7 * 24 * 3600 : 3600
+        let fm = FileManager.default
+        var offset: Int64 = 0
+        if resume, let n = (try? fm.attributesOfItem(atPath: file.path))?[.size] as? Int64 { offset = n }
+        if offset == 0 { try? fm.removeItem(at: file); guard fm.createFile(atPath: file.path, contents: nil) else { throw ResourceError.network } }
+        let receiver = ChunkReceiver(file: file, offset: offset, progress: progress)
+        let session = URLSession(configuration: c, delegate: receiver, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let (tmp, response) = try await session.download(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ResourceError.network }
-        try? FileManager.default.removeItem(at: file)
-        try FileManager.default.moveItem(at: tmp, to: file)
-        progress((try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? Int64 ?? 0)
+        var request = URLRequest(url: url)
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")   // byte offsets for resuming must match the bytes on disk
+        if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+        let task = session.dataTask(with: request)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (k: CheckedContinuation<Void, Error>) in
+                receiver.start(k); task.resume()
+            }
+        } onCancel: { task.cancel() }
+    }
+}
+
+/// Writes the received chunks to the file and reports the size so far. Appends after a 206 answer, starts over after a 200.
+private final class ChunkReceiver: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let file: URL, progress: (Int64) -> Void
+    private var offset: Int64
+    private var handle: FileHandle?
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var rangeSatisfied = false
+    private var failed = false
+
+    init(file: URL, offset: Int64, progress: @escaping (Int64) -> Void) { self.file = file; self.offset = offset; self.progress = progress }
+    func start(_ k: CheckedContinuation<Void, Error>) { continuation = k }
+
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else { failed = true; completionHandler(.cancel); return }
+        switch http.statusCode {
+        case 206 where offset > 0:
+            handle = try? FileHandle(forWritingTo: file); _ = try? handle?.seekToEnd()
+        case 200:
+            offset = 0   // the host ignored the Range request: start over
+            handle = try? FileHandle(forWritingTo: file); try? handle?.truncate(atOffset: 0)
+        case 416:
+            rangeSatisfied = true; completionHandler(.cancel); return   // already have all of it: the caller checks size and hash
+        default:
+            failed = true; completionHandler(.cancel); return
+        }
+        if handle == nil { failed = true; completionHandler(.cancel); return }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        do { try handle?.write(contentsOf: data) } catch { failed = true; dataTask.cancel(); return }
+        offset += Int64(data.count)
+        progress(offset)
+    }
+
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        try? handle?.close(); handle = nil
+        let k = continuation; continuation = nil
+        if rangeSatisfied { k?.resume(); return }
+        if failed { k?.resume(throwing: ResourceError.network); return }
+        if let e = error as? URLError, e.code == .cancelled { k?.resume(throwing: CancellationError()); return }
+        if error != nil { k?.resume(throwing: ResourceError.network); return }
+        k?.resume()
     }
 }
 
 /// Set by the release script (`scripts/sdk-resources.sh`) when it prepares a download release; nil in development builds.
 enum PinnedResources {
-    static let manifestSHA256: String? = "3dea3384f0461bfb8f44a7ee1f138b40a09a05daf69076be1fb8ed0c79ba1015"
-    static let baseURL: URL? = URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.0/")
+    static let manifestSHA256: String? = "61049a81b393ab2eed8326de7ea24cf7a5904cb062aecc145935d83bec3600c9"
+    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.1.1/")
+    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.1/")!]
 }
