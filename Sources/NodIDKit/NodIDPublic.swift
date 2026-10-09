@@ -15,7 +15,7 @@ public enum NodIDOutcome { case verified, notVerified, cancelled, technicalError
 /// func application(_ app: UIApplication, shouldRestoreSecureApplicationState coder: NSCoder) -> Bool { NodID.disableStateRestoration() }
 /// ```
 public enum NodID {
-    /// Call once at app launch. Downloads and checks the proving files (about 135 MB, first run only) in the background, so they are ready before
+    /// Call once at app launch. Downloads and checks the proving files (about 46 MB, first run only) in the background, so they are ready before
     /// a member opens the flow. Nothing happens when the files are already on the phone. It continues where it stopped if the app is closed,
     /// and by default waits for Wi-Fi; pass `allowCellular: true` to download over mobile data too. If a member opens the flow before it is done,
     /// the flow finishes the download over any network and shows the progress.

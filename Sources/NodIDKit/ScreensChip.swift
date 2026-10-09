@@ -153,7 +153,7 @@ struct ProvingScreen: View {
                     }
                 }
  if let p = model.downloadPercent {
-                    Text("Getting ready for the first time: \(p)%. This one-time download is about 130 MB. Nothing about you is uploaded.")
+                    Text("Getting ready for the first time: \(p)%. This one-time download is about 40 MB. Nothing about you is uploaded.")
                         .font(.footnote.weight(.medium)).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Getting ready for the first time, \(p) percent")
                 }

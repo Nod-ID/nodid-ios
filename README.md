@@ -9,7 +9,7 @@ Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator
 - Signing & Capabilities: add **Near Field Communication Tag Reading**. Entitlement `com.apple.developer.nfc.readersession.formats` = `TAG`.
 - Info.plist: `NFCReaderUsageDescription`, `NSCameraUsageDescription` (your own words, say it stays on the phone), and `com.apple.developer.nfc.readersession.iso7816.select-identifiers` = `A0000002471001`, `A0000002472001`, `00000000000000`.
 
-**3. Proving resources (circuits, keys, SRS, CSCA files; about 135 MB).** Release builds of the package download them once into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. Files come from `nodid.app/sdk/<version>/` and, if that is unreachable, from the GitHub release. A stopped download continues where it stopped. Nothing about the member is uploaded.
+**3. Proving resources (circuits, keys, SRS, CSCA files).** Release builds of the package download what a member's passport needs once, into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. Files come from `nodid.app/sdk/<version>/` and, if that is unreachable, from the GitHub release. Up to four files download at once, and a stopped download continues where it stopped. The shared files (SRS, keys, CSCA data) are about 34 MB; each passport then needs only its own two or three circuits (4 to 15 MB), so a typical first run is about 40 MB, not the full 135 MB set. Nothing about the member is uploaded.
 
 **Call `NodID.prefetch()` at app launch** so the files are ready before a member ever opens the flow:
 ```swift
@@ -17,7 +17,7 @@ Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator
 NodID.prefetch()                      // waits for Wi-Fi (default)
 // NodID.prefetch(allowCellular: true) // also over mobile data
 ```
-It returns at once and downloads in the background; it does nothing when the files are already on the phone. If the app is closed first, the next launch continues. If a member opens the flow before it finishes, the flow completes the download over any network and shows "Getting ready for the first time" with a percentage that follows the bytes. Without `prefetch()`, the flow starts the download when it opens (Wi-Fi only until the proof needs it).
+It returns at once and downloads in the background: the shared files plus the circuits most passports use (P-256 and RSA-2048), about 46 MB. A passport that needs a different circuit fetches just that one when it is scanned (a few MB). It does nothing when the files are already on the phone. If the app is closed first, the next launch continues. If a member opens the flow before it finishes, the flow completes the download over any network and shows "Getting ready for the first time" with a percentage that follows the bytes. Without `prefetch()`, the flow starts the download when it opens (Wi-Fi only until the proof needs it).
 
 To ship the files inside your app instead (no download), add the resources folder from the release to your app target as a **group**, not a folder reference, so the files sit flat; or pass `RealServices(resources: url)`. Development builds of the package (this repository) expect the bundled folder.
 

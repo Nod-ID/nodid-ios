@@ -1,11 +1,13 @@
-// The proving resources (circuits, verification keys, SRS, CSCA files; about 130 MB) as a one-time download instead of part of the host app.
+// The proving resources (circuits, verification keys, SRS, CSCA files; about 135 MB in all, about 40 MB for one passport) as a one-time download instead of part of the host app.
 // Rule 6 (pinned versions): the SDK carries the SHA-256 of the release's manifest (`PinnedResources`); the manifest lists every file with its size
 // and SHA-256; nothing is used unless it matches, so the download host is trusted for delivery only, not for content. Plain Foundation and
 // CryptoKit, so Tests/ResourceStoreCheck.swift runs on the Mac.
 import Foundation
 import CryptoKit
 
-struct ResourceFile: Codable, Equatable { let name: String; let size: Int; let sha256: String }
+/// `tier` groups the files: "base" (shared by every passport: the SRS, keys, CSCA data), "common" (the circuits most passports need, fetched ahead of time
+/// by `NodID.prefetch`), "extra" (the other circuits, fetched only when a passport needs one). No tier means "base".
+struct ResourceFile: Codable, Equatable { let name: String; let size: Int; let sha256: String; var tier: String? = nil }
 struct ResourceManifest: Codable, Equatable { let version: String; let files: [ResourceFile] }
 
 enum ResourceError: Error, Equatable {
@@ -39,22 +41,107 @@ struct ResourceStore {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private var markerURL: URL { directory.appendingPathComponent(".verified") }
-
     /// A file name the manifest may use: no path parts, nothing hidden.
     static func safe(_ name: String) -> Bool {
         !name.isEmpty && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".") && !name.contains("..") && name.count < 128
     }
 
-    /// True when a previous run finished and every file is still there with the recorded size. Quick: no hashing.
-    func isComplete() -> Bool {
-        guard let marker = try? String(contentsOf: markerURL, encoding: .utf8), marker == pinnedManifestSHA256,
-              let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")),
-              let m = try? JSONDecoder().decode(ResourceManifest.self, from: data), sha256Hex(data) == pinnedManifestSHA256 else { return false }
-        return m.files.allSatisfy { f in
+    private var manifestURL: URL { directory.appendingPathComponent("manifest.json") }
+
+    /// The manifest on disk, if it is the pinned one.
+    private func localManifest() -> ResourceManifest? {
+        guard let data = try? Data(contentsOf: manifestURL), sha256Hex(data) == pinnedManifestSHA256 else { return nil }
+        return try? JSONDecoder().decode(ResourceManifest.self, from: data)
+    }
+
+    /// Which files a call is about: everything (no arguments), whole tiers, and/or named files.
+    private func selected(_ m: ResourceManifest, tiers: Set<String>?, names: Set<String>) -> [ResourceFile] {
+        if tiers == nil && names.isEmpty { return m.files }
+        return m.files.filter { names.contains($0.name) || (tiers?.contains($0.tier ?? "base") ?? false) }
+    }
+
+    /// True when the pinned manifest is on disk and every selected file is there with the recorded size. Quick: no hashing.
+    /// (A file only gets its final name after its hash was checked.)
+    func isComplete(tiers: Set<String>? = nil, names: Set<String> = []) -> Bool {
+        guard let m = localManifest(), names.isSubset(of: Set(m.files.map(\.name))) else { return false }   // a name that is not listed is never "complete"
+        return selected(m, tiers: tiers, names: names).allSatisfy { f in
             let a = try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(f.name).path)
             return (a?[.size] as? Int) == f.size
         }
+    }
+
+    private func sha256Hex(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+
+    /// Makes the selected files complete and returns the folder. Files already there and correct are kept. Up to `parallel` files download at once.
+    /// `progress` is 0...1 over all the bytes still to get. A name the manifest does not list is an error (`badManifest`).
+    @discardableResult
+    func ensure(tiers: Set<String>? = nil, names: Set<String> = [], parallel: Int = 4, progress: @escaping (Double) -> Void = { _ in }) async throws -> URL {
+        let fm = FileManager.default
+        if isComplete(tiers: tiers, names: names) { progress(1); return directory }
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        var ex = URLResourceValues(); ex.isExcludedFromBackup = true
+        var dir = directory; try? dir.setResourceValues(ex)
+
+        var manifest = localManifest()
+        if manifest == nil {
+            let part = directory.appendingPathComponent("manifest.json.part")
+            try? fm.removeItem(at: part)
+            try await fetchAny("manifest.json", to: part, resume: false, progress: { _ in })
+            guard try Self.sha256(of: part) == pinnedManifestSHA256 else { try? fm.removeItem(at: part); throw ResourceError.manifestMismatch }
+            let manifestData = try Data(contentsOf: part)
+            guard let m = try? JSONDecoder().decode(ResourceManifest.self, from: manifestData), !m.files.isEmpty else { throw ResourceError.badManifest }
+            for f in m.files where !Self.safe(f.name) { throw ResourceError.unsafeName(f.name) }
+            try? fm.removeItem(at: manifestURL)
+            try fm.moveItem(at: part, to: manifestURL)    // verified against the pin, so it can stay
+            manifest = m
+        }
+        guard let m = manifest else { throw ResourceError.badManifest }
+        let known = Set(m.files.map(\.name))
+        for n in names where !known.contains(n) { throw ResourceError.badManifest }
+
+        // What is missing or wrong (size first, then hash for files that look present). Biggest first, so the long download starts early.
+        var todo: [ResourceFile] = []
+        for f in selected(m, tiers: tiers, names: names) {
+            let u = directory.appendingPathComponent(f.name)
+            if let a = try? fm.attributesOfItem(atPath: u.path), (a[.size] as? Int) == f.size, (try? Self.sha256(of: u)) == f.sha256 { continue }
+            todo.append(f)
+        }
+        todo.sort { $0.size > $1.size }
+        let total = max(1, todo.reduce(0) { $0 + $1.size })
+        let counter = ByteCounter(total: total, report: progress)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var next = 0
+            func launch() {
+                guard next < todo.count else { return }
+                let f = todo[next]; next += 1
+                group.addTask { try await self.fetchFile(f, counter: counter) }
+            }
+            for _ in 0..<max(1, min(parallel, todo.count)) { launch() }
+            while try await group.next() != nil { launch() }
+        }
+        progress(1)
+        return directory
+    }
+
+    /// One file: continue a partial one, check size and hash, move it into place. A bad finished file is fetched again from the start, once.
+    private func fetchFile(_ f: ResourceFile, counter: ByteCounter) async throws {
+        let fm = FileManager.default
+        let target = directory.appendingPathComponent(f.name), tmp = directory.appendingPathComponent(f.name + ".part")
+        var attempt = 0
+        while true {
+            let resume = attempt == 0 && ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int ?? 0) > 0
+            if !resume { try? fm.removeItem(at: tmp) }
+            try await fetchAny(f.name, to: tmp, resume: resume, progress: { got in counter.set(f.name, min(Int(got), f.size)) })
+            if (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int == f.size, try Self.sha256(of: tmp) == f.sha256 { break }
+            try? fm.removeItem(at: tmp)
+            counter.set(f.name, 0)
+            attempt += 1
+            if attempt > 1 { throw ResourceError.fileMismatch(f.name) }
+        }
+        try? fm.removeItem(at: target)
+        try fm.moveItem(at: tmp, to: target)
+        counter.set(f.name, f.size)
     }
 
     /// Fetches one file from the first host that answers. Stops at once when the task is cancelled.
@@ -66,59 +153,17 @@ struct ResourceStore {
         throw ResourceError.network
     }
 
-    private func sha256Hex(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+}
 
-    /// Makes the folder complete and returns it. Files already there and correct are kept. `progress` is 0...1 over all the bytes still to get.
-    @discardableResult
-    func ensure(progress: @escaping (Double) -> Void = { _ in }) async throws -> URL {
-        let fm = FileManager.default
-        if isComplete() { progress(1); return directory }
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        var ex = URLResourceValues(); ex.isExcludedFromBackup = true
-        var dir = directory; try? dir.setResourceValues(ex)
-
-        let manifestFile = directory.appendingPathComponent("manifest.json")
-        let part = directory.appendingPathComponent("manifest.json.part")
-        try? fm.removeItem(at: part)
-        try await fetchAny("manifest.json", to: part, resume: false, progress: { _ in })
-        guard try Self.sha256(of: part) == pinnedManifestSHA256 else { try? fm.removeItem(at: part); throw ResourceError.manifestMismatch }
-        let manifestData = try Data(contentsOf: part)
-        guard let manifest = try? JSONDecoder().decode(ResourceManifest.self, from: manifestData), !manifest.files.isEmpty else { throw ResourceError.badManifest }
-        for f in manifest.files where !Self.safe(f.name) { throw ResourceError.unsafeName(f.name) }
-
-        // What is missing or wrong (size first, then hash for files that look present).
-        var todo: [ResourceFile] = []
-        for f in manifest.files {
-            let u = directory.appendingPathComponent(f.name)
-            if let a = try? fm.attributesOfItem(atPath: u.path), (a[.size] as? Int) == f.size, (try? Self.sha256(of: u)) == f.sha256 { continue }
-            todo.append(f)
-        }
-        let total = max(1, todo.reduce(0) { $0 + $1.size })
-        var done = 0
-        for f in todo {
-            let target = directory.appendingPathComponent(f.name), tmp = directory.appendingPathComponent(f.name + ".part")
-            // A partial file from an interrupted run is continued; if the finished file does not match, it is fetched again from the start, once.
-            var attempt = 0
-            while true {
-                let resume = attempt == 0 && ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int ?? 0) > 0
-                if !resume { try? fm.removeItem(at: tmp) }
-                let before = done
-                try await fetchAny(f.name, to: tmp, resume: resume, progress: { got in progress(min(1, Double(before + Int(got)) / Double(total))) })
-                if (try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? Int == f.size, try Self.sha256(of: tmp) == f.sha256 { break }
-                try? fm.removeItem(at: tmp)
-                attempt += 1
-                if attempt > 1 { throw ResourceError.fileMismatch(f.name) }
-            }
-            try? fm.removeItem(at: target)
-            try fm.moveItem(at: tmp, to: target)
-            done += f.size
-            progress(Double(done) / Double(total))
-        }
-        try? fm.removeItem(at: manifestFile)
-        try fm.moveItem(at: part, to: manifestFile)
-        try pinnedManifestSHA256.write(to: markerURL, atomically: true, encoding: .utf8)   // last: a half-finished folder never looks complete
-        progress(1)
-        return directory
+/// Bytes received so far per file, summed into one progress number. Safe to call from several downloads at once.
+final class ByteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var got: [String: Int] = [:]
+    private let total: Int, report: (Double) -> Void
+    init(total: Int, report: @escaping (Double) -> Void) { self.total = total; self.report = report }
+    func set(_ name: String, _ bytes: Int) {
+        lock.lock(); got[name] = bytes; let sum = got.values.reduce(0, +); lock.unlock()
+        report(min(1, Double(sum) / Double(total)))
     }
 }
 
@@ -202,7 +247,7 @@ private final class ChunkReceiver: NSObject, URLSessionDataDelegate, @unchecked 
 
 /// Set by the release script (`scripts/sdk-resources.sh`) when it prepares a download release; nil in development builds.
 enum PinnedResources {
-    static let manifestSHA256: String? = "61049a81b393ab2eed8326de7ea24cf7a5904cb062aecc145935d83bec3600c9"
-    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.1.1/")
-    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.1/")!]
+    static let manifestSHA256: String? = "364fd29c074086b7d6e4045748e3cd5930f78eaf26a529956259541d29b5ecaa"
+    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.1.2/")
+    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.1.2/")!]
 }

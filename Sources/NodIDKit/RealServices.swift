@@ -80,20 +80,30 @@ public final class RealServices: NodIDServices {
     static func prefetch(allowCellular: Bool) {
         guard let d = downloadConfig() else { return }
         let store = makeStore(d, allowExpensive: allowCellular, waitForConnectivity: true)
-        guard !store.isComplete() else { return }
+        guard !store.isComplete(tiers: prefetchTiers) else { return }
         PrefetchState.shared.start(allowCellular: allowCellular) {
-            try? await ResourceGate.shared.run { try await store.ensure { ResourceProgress.shared.publish($0) } }
+            try? await ResourceGate.shared.run { try await store.ensure(tiers: prefetchTiers) { ResourceProgress.shared.publish($0) } }
         }
     }
 
     /// Makes sure the proving resources are on the phone. Nothing to do when they are in the app. Safe to call from several places at once.
     public func resourcesReady(progress: @escaping (Int) -> Void) async throws {
         guard let cheap = resourceStore(allowExpensive: false), let any = resourceStore(allowExpensive: true) else { return }
-        if cheap.isComplete() { return }
+        if cheap.isComplete(tiers: baseTiers) { return }
         PrefetchState.shared.stopWifiOnly()      // the member is waiting now: finish over any network (partial files are kept)
         let id = ResourceProgress.shared.observe(progress)
         defer { ResourceProgress.shared.remove(id) }
-        try await gate.run { try await any.ensure { ResourceProgress.shared.publish($0) } }
+        try await gate.run { try await any.ensure(tiers: baseTiers) { ResourceProgress.shared.publish($0) } }
+    }
+
+    /// The circuit files for the passport being verified (known once the chip has been read and the signature type is clear). Usually already
+    /// on the phone from the prefetch; otherwise only these files are fetched.
+    func circuitsReady(names: [String]) async throws {
+        guard let any = resourceStore(allowExpensive: true) else { return }
+        let files = Set(names.map { $0 + ".json" })
+        if any.isComplete(names: files) { return }
+        PrefetchState.shared.stopWifiOnly()
+        try await gate.run { try await any.ensure(names: files) { ResourceProgress.shared.publish($0) } }
     }
 
     // MARK: placement
@@ -197,9 +207,11 @@ public final class RealServices: NodIDServices {
               let served = try? JSONSerialization.jsonObject(with: servedData) as? [String] else { throw ServicesError.missingResource }
         let sessionBox = ps
         let prefix = cscaPrefix
-        _ = try await Task.detached(priority: .userInitiated) {
+        let circuitNames = try await Task.detached(priority: .userInitiated) {
             try sessionBox.prepare(certsPath: res + "/\(prefix)-certs.bin", leavesPath: res + "/\(prefix)-leaves.txt", rootHex: rootText, served: served)
         }.value
+        try await circuitsReady(names: circuitNames)      // only the circuits this passport needs
+        try Task.checkCancellation()
 
         onStep(.makingProof)
         let tProve = CFAbsoluteTimeGetCurrent()
@@ -226,7 +238,7 @@ public final class RealServices: NodIDServices {
     // MARK: network
     public func warmUp() async {
         // First open after install: fetch the resources in the background (not over mobile data; proving fetches them anyway if still missing).
-        if let cheap = resourceStore(allowExpensive: false), !cheap.isComplete() { try? await gate.run { try await cheap.ensure { ResourceProgress.shared.publish($0) } } }
+        if let cheap = resourceStore(allowExpensive: false), !cheap.isComplete(tiers: prefetchTiers) { try? await gate.run { try await cheap.ensure(tiers: prefetchTiers) { ResourceProgress.shared.publish($0) } } }
         let path = resources + "/nodid.srs"
         await Task.detached(priority: .utility) { warmNoirSrs(srsPath: path) }.value
     }
@@ -249,6 +261,10 @@ public final class RealServices: NodIDServices {
     }
 }
 
+
+/// What the first run needs for every passport, and what `prefetch()` and the flow's background start fetch ahead of time.
+let baseTiers: Set<String> = ["base"]
+let prefetchTiers: Set<String> = ["base", "common"]
 
 /// Runs one download at a time: a second caller waits for the first and then checks again (the folder is complete, or it tries itself).
 actor ResourceGate {

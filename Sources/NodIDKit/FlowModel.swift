@@ -356,8 +356,10 @@ final class NodIDFlowModel {
         proveTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await services.resourcesReady { [weak self] p in Task { @MainActor in self?.downloadPercent = p } }
-                downloadPercent = nil
+                // One feed for every download of this run (the shared files, then the circuits this passport needs).
+                let feed = ResourceProgress.shared.observe { [weak self] p in Task { @MainActor in self?.downloadPercent = p >= 100 ? nil : p } }
+                defer { ResourceProgress.shared.remove(feed); Task { @MainActor [weak self] in self?.downloadPercent = nil } }
+                try await services.resourcesReady { _ in }
                 let result = try await services.prove(chip: handle, sessionId: sessionId) { [weak self] step in
                     Task { @MainActor in self?.proofStep = step }
                 }
