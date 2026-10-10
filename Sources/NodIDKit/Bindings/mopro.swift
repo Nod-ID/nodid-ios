@@ -604,6 +604,12 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol ProofSessionProtocol: AnyObject, Sendable {
     
     /**
+     * The DG2 binding for the face prover: `hi` (32 bytes) || `lo` (32) || `r` (32), big-endian field elements, from `prepare` until `wipe()`.
+     * Memory only: never logged or stored here; the caller must not keep it past the session.
+     */
+    func dg2Binding() throws  -> Data
+    
+    /**
      * Rules switched on by the app, checked on the phone: "expired", "underage", "country", "unreadable", or nil when all pass.
      */
     func localCheck() throws  -> String?
@@ -708,6 +714,19 @@ public convenience init(policyJson: Data, sod: Data, dg1: Data)throws  {
 
     
 
+    
+    /**
+     * The DG2 binding for the face prover: `hi` (32 bytes) || `lo` (32) || `r` (32), big-endian field elements, from `prepare` until `wipe()`.
+     * Memory only: never logged or stored here; the caller must not keep it past the session.
+     */
+open func dg2Binding()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
+        uniffiCallStatus in
+    uniffi_m0spike_fn_method_proofsession_dg2_binding(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Rules switched on by the app, checked on the phone: "expired", "underage", "country", "unreadable", or nil when all pass.
@@ -1716,6 +1735,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_m0spike_checksum_func_placement_order() != 59524) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_m0spike_checksum_method_proofsession_dg2_binding() != 23200) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_m0spike_checksum_method_proofsession_local_check() != 27639) {

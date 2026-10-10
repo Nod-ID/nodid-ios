@@ -51,13 +51,13 @@ The app learns only the outcome. Reasons (under age, country, expired, already u
 ```
 GET https://api.nodid.app/v1/sessions/<sessionId>/result    Authorization: Bearer <your secret key>
 -> {"outcome":"verified","assurance":"substantial","unique":true,"personCode":"...","method":"passport_nfc",
-    "versions":{"circuit":"...","vk":"...","dscTree":"...","sdk":"0.2.0"}}     (202 while pending)
+    "versions":{"circuit":"...","vk":"...","dscTree":"...","sdk":"0.3.0"}}     (202 while pending)
 ```
 - `outcome`: `verified`, `not_verified`, `cancelled` or `technical_error`.
 - `assurance`: how sure the method makes us. `substantial` for a passport proof today; `high` (passport and face match) and `basic` (an OS age signal or estimation) come with those methods. Only present when verified.
 - `unique`: `true` only for passport methods. `personCode` is present only when `unique` is `true`.
 - `method`: `passport_nfc` today.
-- `versions`: the circuit, key, certificate-tree and SDK versions that made the result. Keep them with the result.
+- `versions`: the circuit, key, certificate-tree and SDK versions that made the result. Keep them with the result. Circuit names start with `m2-` (SDK 0.1.x and 0.2.x) or `m3-` (SDK 0.3.x and later, which add a hidden face-photo commitment the verifier does not return). Both are accepted; nothing in your integration changes.
 - In the dashboard you can set a **minimum assurance** and whether a **unique person is required**, per app. A result below your minimum comes back as `not_verified`, with no reason.
 
 `personCode` is stable for the same person in your app and cannot be matched across other apps. Use it for one-account-per-person.

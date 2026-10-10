@@ -39,6 +39,10 @@ public final class RealServices: NodIDServices {
     @_spi(Testing) public var policyJSONForSelfTest: Data? { policyJSON }
     /// Stage timings of the last proof (seconds; no passport data).
     @_spi(Testing) public private(set) var lastTimings = ""
+    /// For the face flow (decision 52): the DG2 binding (`hi`, `lo`, `r`) of the proof in progress, set once the passport proof is prepared and wiped
+    /// when `prove` returns, however it returns. `faceBindingHandler` is called with it at that moment. Memory only; see `DG2Binding`.
+    @_spi(Face) public private(set) var faceBinding: DG2Binding?
+    @_spi(Face) public var faceBindingHandler: ((DG2Binding) -> Void)?
 
     /// - Parameter resources: the folder holding the circuits, verification keys, `nodid.srs`, `served.json` and the `csca-*` files.
     ///   Default: the host app's bundle (the folder reference named in docs/INTEGRATION.md).
@@ -186,7 +190,7 @@ public final class RealServices: NodIDServices {
         let ps: ProofSession
         do { ps = try ProofSession(policyJson: pj, sod: Data(c.sod), dg1: Data(c.dg1)) } catch { c.wipe(); throw error }
         c.wipe()                                           // the Rust session holds the only copy now
-        defer { ps.wipe() }
+        defer { ps.wipe(); faceBinding?.wipe(); faceBinding = nil }
         try Task.checkCancellation()
 
         onStep(.checkingRules)
@@ -220,6 +224,11 @@ public final class RealServices: NodIDServices {
             try sessionBox.prepare(certsPath: res + "/\(prefix)-certs.bin", leavesPath: res + "/\(prefix)-leaves.txt", rootHex: rootText, served: served)
         }.value
         NodTrace.log("prove: prepared (\(circuitNames.count) circuits)")
+        // The face flow (when there is one) takes the DG2 binding from here on; it lives until this call returns.
+        if let raw = try? ps.dg2Binding(), let binding = DG2Binding(raw) {
+            faceBinding = binding
+            faceBindingHandler?(binding)
+        }
         try await circuitsReady(names: circuitNames)      // only the circuits this passport needs
         try Task.checkCancellation()
 
