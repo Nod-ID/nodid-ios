@@ -137,6 +137,12 @@ struct ProvingScreen: View {
     @Environment(\.dynamicTypeSize) private var dts
     @State private var breathe = false
     private var idx: Int { switch model.proofStep { case .none, .some(.passportRead): return 0; case .some(.checkingRules): return 1; case .some(.makingProof): return 2 } }
+    private func stepLabels(_ app: String) -> [String] {
+        #if DEBUG
+        if model.services.isTestMode { return ["Sample chosen", "Checking \(app)'s rules", "No proof made"] }
+        #endif
+        return ["Passport read", "Checking \(app)'s rules", "Making your proof"]
+    }
     private var progress: Double { [0.15, 0.45, 0.78][idx] }
     var body: some View {
         let long = model.provingLong
@@ -146,10 +152,13 @@ struct ProvingScreen: View {
                 if !dts.isAccessibilitySize { ring.padding(.top, 8) }
                 NodTitle(text: long ? "Still working" : "Making your proof").frame(maxWidth: .infinity, alignment: .center).multilineTextAlignment(.center)
                 Text(long ? "Some iPhones take a little longer. Nothing is being uploaded." : "This happens on your iPhone. Nothing is being uploaded.").nodBody().multilineTextAlignment(.center)
+                #if DEBUG
+                if model.services.isTestMode { Text("No proof made in test mode.").font(.subheadline.weight(.semibold)).multilineTextAlignment(.center) }
+                #endif
                 NodCard {
                     ForEach(0..<3, id: \.self) { i in
                         if i > 0 { Divider().padding(.leading, 52) }
-                        stepRow(i, ["Passport read", "Checking \(app)'s rules", "Making your proof"][i])
+                        stepRow(i, stepLabels(app)[i])
                     }
                 }
  if let p = model.downloadPercent {

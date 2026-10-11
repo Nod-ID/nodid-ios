@@ -18,7 +18,7 @@ public enum NodID {
     /// Test apps only: receives a line for each download and proving stage (no passport data). Off by default.
     @_spi(Testing) public static func setTrace(_ sink: ((String) -> Void)?) { NodTrace.sink = sink }
 
-    /// Call once at app launch. Downloads and checks the proving files (about 46 MB, first run only) in the background, so they are ready before
+    /// Call once at app launch. Downloads and checks the proving files (the whole set, about 138 MB, the same for every member; first run only) in the background, so they are ready before
     /// a member opens the flow. Nothing happens when the files are already on the phone. It continues where it stopped if the app is closed,
     /// and by default waits for Wi-Fi; pass `allowCellular: true` to download over mobile data too. If a member opens the flow before it is done,
     /// the flow finishes the download over any network and shows the progress.

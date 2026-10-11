@@ -22,7 +22,7 @@ struct SuccessScreen: View {
                             .padding(.horizontal, 16).frame(minHeight: 44).accessibilityElement(children: .combine)
                     }
                 }
-                Text("The details read from your passport have been deleted from this iPhone.").font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                Text(model.services.isTestMode ? "Test mode: no passport was read and nothing was checked." : "The details read from your passport have been deleted from this iPhone.").font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
             }
         } footer: {
             NodPrimaryButton(title: "Done") { model.backToHost(.verified) }
@@ -42,6 +42,9 @@ struct ReceiptScreen: View {
         if model.showAge { r.append(("Over \(model.minAge)", "Yes")) }
         if p?.checkExpiry ?? false { r.append(("Passport valid", "Yes")) }
         if p?.checkCountry ?? false { r.append(("Country accepted", "Yes")) }
+        #if DEBUG
+        if model.services.isTestMode { r.append(("Mode", "Test sample")) }
+        #endif
         r.append(("Date", dateText)); r.append(("Reference", model.reference ?? ""))
         return r
     }

@@ -4,7 +4,7 @@ import DeviceCheck
 import Security
 
 /// The SDK version the verifier records with each proof. `scripts/sdk-release.sh` refuses to build a release whose version differs.
-enum NodIDVersion { static let sdk = "0.3.0" }
+enum NodIDVersion { static let sdk = "0.4.0" }
 
 /// App Attest on every passport proof (docs/RESULT_AND_ATTESTATION.md section 2, decision 48).
 /// The SDK attests a key once per install (the attestation travels with the first proof) and signs an assertion over
@@ -26,6 +26,12 @@ enum AttestHash {
     }
     static func attestChallenge(nonce: Data) -> Data { sha([Data("nodid.attest.v1".utf8), nonce]) }
     static func assertionHash(nonce: Data, proofHash: Data, sdk: String) -> Data { sha([Data("nodid.assert.v1".utf8), nonce, proofHash, Data(sdk.utf8)]) }
+    /// Handoff to the Nod ID app (decision 56, nodid-app docs/HANDOFF_PROTOCOL.md): the host app asserts over the session nonce.
+    static func handoffHash(nonce: Data) -> Data { sha([Data("nodid.handoff.v1".utf8), nonce]) }
+    /// The Nod ID app's proof assertion: also covers the 16-byte handoff id and the read mode (1 fresh, 2 stored), which sets `method`.
+    static func appAssertionHash(nonce: Data, proofHash: Data, handoffId: Data, read: UInt8, sdk: String) -> Data {
+        sha([Data("nodid.assert.app.v1".utf8), nonce, proofHash, handoffId, Data([read]), Data(sdk.utf8)])
+    }
 }
 
 /// Apple's side, behind a protocol so the logic can be tested without a device.
@@ -50,8 +56,13 @@ protocol AttestKeyStore {
     func clear()
 }
 struct KeychainAttestStore: AttestKeyStore {
-    let service = "app.nodid.sdk.attest"
-    private func query(_ account: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account] }
+    var service = "app.nodid.sdk.attest"
+    /// Empty for the SDK's one key. The Nod ID app keeps one key per app scope (decision 56): the scope suffixes the account names.
+    var scope = ""
+    func account(_ name: String) -> String { scope.isEmpty ? name : "\(name).\(scope)" }
+    private func query(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: self.account(account)]
+    }
     private func read(_ account: String) -> String? {
         var r: CFTypeRef?
         guard SecItemCopyMatching(query(account).merging([kSecReturnData as String: true]) { $1 } as CFDictionary, &r) == errSecSuccess, let d = r as? Data else { return nil }
@@ -107,8 +118,12 @@ actor AppAttest {
 
     /// The assertion for one submission, or nil. On `invalidKey` (reinstall) a new key is attested and the assertion made with it.
     func sign(nonce: Data, path: String, proofs: [(circuit: String, proof: Data)], sdk: String) async -> AttestPayload? {
+        await sign(nonce: nonce, clientDataHash: AttestHash.assertionHash(nonce: nonce, proofHash: AttestHash.proofHash(path: path, proofs: proofs), sdk: sdk))
+    }
+
+    /// The assertion over any client data hash bound to this session's nonce (proof, handoff), with the attestation on the key's first use.
+    func sign(nonce: Data, clientDataHash cdh: Data) async -> AttestPayload? {
         if preparedFor != nonce || prepared == nil { guard await prepare(nonce: nonce) else { return nil } }
-        let cdh = AttestHash.assertionHash(nonce: nonce, proofHash: AttestHash.proofHash(path: path, proofs: proofs), sdk: sdk)
         for attempt in 0..<2 {
             guard let p = prepared else { return nil }
             do {

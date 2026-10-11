@@ -28,6 +28,10 @@ enum FlowScreen: Equatable {
     case cancelled           // 07g
     case digitalId           // 08a (stub)
     case noPassport          // 08b (stub)
+    #if DEBUG
+    case samplePicker        // test mode only: choose a sample passport
+    #endif
+    case handoff             // waiting while the member finishes in the Nod ID app (decision 56)
 }
 
 enum NFCUIState: Equatable {
@@ -77,13 +81,16 @@ final class NodIDFlowModel {
     @ObservationIgnored let sessionId: String
     @ObservationIgnored private let onFinish: (NodIDOutcome) -> Void
     @ObservationIgnored private var mrz: MRZData?
-    @ObservationIgnored private var chip: ChipHandle?
+    @ObservationIgnored var chip: ChipHandle?
     @ObservationIgnored private var chipTask: Task<Void, Never>?
     @ObservationIgnored private var proveTask: Task<Void, Never>?
     @ObservationIgnored private var longTask: Task<Void, Never>?
     @ObservationIgnored private var closerTask: Task<Void, Never>?
     @ObservationIgnored private var captureTask: Task<Void, Never>?
     @ObservationIgnored private var finished = false
+    /// Set when the outcome came back from the Nod ID app through `NodID.handle(_:)` (nothing to report).
+    @ObservationIgnored var handoffSettled = false
+    @ObservationIgnored var handoffLink: URL?
     @ObservationIgnored let scanner = MRZScanner()
     @ObservationIgnored private var cameraKnownGood = false
 
@@ -120,7 +127,7 @@ final class NodIDFlowModel {
             do {
                 let p = try await services.fetchPolicy(sessionId: sessionId)
                 policy = p
-                go(.intro)
+                await beginAfterPolicy(p)
             } catch {
                 go(.failure(.technical))
             }
@@ -130,7 +137,12 @@ final class NodIDFlowModel {
     func retryLoad() { screen = .loading; start() }
 
     // MARK: navigation
-    func go(_ s: FlowScreen) {
+    func go(_ requested: FlowScreen) {
+        var s = requested
+        #if DEBUG
+        // Test mode has no scan and no NFC: every way into them lands on the sample picker.
+        if services.isTestMode, [.need, .prime, .scan, .manual, .placement].contains(s) { s = .samplePicker }
+        #endif
         if screen == .scan, s != .scan { stopScanner() }
         if screen == .placement, s != .placement { stopChip() }
         screen = s
@@ -148,6 +160,9 @@ final class NodIDFlowModel {
         case .placement: return mrzTyped ? .manual : .scan
         case .receipt: return .success
         case .digitalId, .noPassport: return .intro
+        #if DEBUG
+        case .samplePicker: return .intro
+        #endif
         default: return nil
         }
     }
@@ -173,6 +188,8 @@ final class NodIDFlowModel {
         guard !finished else { return }
         finished = true
         cancelWork(); wipe()
+        NodIDHandoff.shared.clear(self)
+        if handoffSettled { onFinish(o); return }   // the Nod ID app already reported it; the verifier holds the outcome
         switch o {
         case .cancelled: let (svc, id) = (services, sessionId); Task { await svc.report(sessionId: id, outcome: "cancelled") }
         case .technicalError: let (svc, id) = (services, sessionId); Task { await svc.report(sessionId: id, outcome: "technical_error") }
@@ -203,6 +220,9 @@ final class NodIDFlowModel {
 
     /// Goes to the scan screen (or the permission screen when the camera is off).
     func scanOrPermission() {
+        #if DEBUG
+        if services.isTestMode { go(.samplePicker); return }
+        #endif
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: go(.scan)
         case .notDetermined: go(.prime)
@@ -343,7 +363,7 @@ final class NodIDFlowModel {
     }
 
     // MARK: proving
-    private func startProving() {
+    func startProving() {
         guard let handle = chip else { go(.failure(.technical)); return }
         go(.proving)
         NodTrace.log("flow: proving started")

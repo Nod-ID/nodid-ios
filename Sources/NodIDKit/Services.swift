@@ -31,6 +31,10 @@ public struct SessionPolicy {
     public var onePerPerson: Bool          // the app allows one account per person: the intro says "This is your only account"
     public var offerDigitalId: Bool        // show the Wallet option (decisions 14, 21); the app's dashboard sets it
     public var alternatives: [Alternative] // other ways the app accepts, for screen 08b
+    /// The app allows the Nod ID app and has a registered return link (decision 56): the flow hands off when the Nod ID app is installed.
+    public var appHandoff = false
+    /// This request must read the chip now (no stored data).
+    public var freshRead = false
     public struct Alternative { public var title: String; public var detail: String
         public init(title: String, detail: String) { self.title = title; self.detail = detail } }
     public init(appName: String, accentHex: String, minAge: Int, checkAge: Bool, checkExpiry: Bool, checkCountry: Bool, helpURL: URL?,
@@ -77,12 +81,21 @@ public protocol NodIDServices: AnyObject {
     func warmUp() async
     /// Makes sure the proving resources are on the phone (a one-time download when they are not shipped in the app). `progress` is 0 to 100.
     func resourcesReady(progress: @escaping (Int) -> Void) async throws
+    /// True only for the local test engine (Debug builds, test key). The flow then shows the TEST MODE banner and skips scan and NFC.
+    var isTestMode: Bool { get }
+    /// Handoff to the Nod ID app (decision 56): attests the host app over `nodid.handoff.v1` and returns the universal link to open, or nil.
+    func startHandoff(sessionId: String) async -> URL?
+    /// Confirms the result the Nod ID app returned with its single-use token; the outcome category, or nil when it was not accepted.
+    func confirmHandoff(sessionId: String, returnToken: String) async -> String?
 }
 
 public extension NodIDServices {
+    var isTestMode: Bool { false }
     func report(sessionId: String, outcome: String) async {}
     func warmUp() async {}
     func resourcesReady(progress: @escaping (Int) -> Void) async throws {}
+    func startHandoff(sessionId: String) async -> URL? { nil }
+    func confirmHandoff(sessionId: String, returnToken: String) async -> String? { nil }
 }
 
 /// Runs the whole flow with timers and no passport (for previews and UI tests).

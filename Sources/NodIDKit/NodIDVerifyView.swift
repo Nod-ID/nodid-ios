@@ -25,6 +25,9 @@ public struct NodIDVerifyView: View {
         case .receipt: return "Receipt"
         case .digitalId: return "Digital ID"
         case .noPassport: return "Other options"
+        #if DEBUG
+        case .samplePicker: return "Test mode"
+        #endif
         default: return nil
         }
     }
@@ -44,11 +47,19 @@ public struct NodIDVerifyView: View {
                 }
             }
         }
+        #if DEBUG
+        .safeAreaInset(edge: .bottom, spacing: 0) { if services.isTestMode { TestBanner() } }
+        #endif
         .environment(\.nod, nod)
         .tint(nod.acc)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.screen)
         .interactiveDismissDisabled(model.lockDismiss)
-        .onAppear { SnapshotCover.shared.install(); model.start() }
+        .onAppear {
+            #if DEBUG
+            if !services.isTestMode { NodIDSetupCheck.runOnce(key: nil) }   // test keys are checked in NodID.verify
+            #endif
+            SnapshotCover.shared.install(); model.start()
+        }
         .onDisappear { SnapshotCover.shared.remove(); model.viewDisappeared() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in model.recheckCamera() }
     }
@@ -69,6 +80,10 @@ public struct NodIDVerifyView: View {
         case .cancelled: CancelledScreen(model: model)
         case .digitalId: DigitalIDScreen(model: model)
         case .noPassport: NoPassportScreen(model: model)
+        #if DEBUG
+        case .samplePicker: SamplePickerScreen(model: model)
+        #endif
+        case .handoff: HandoffScreen(model: model)
         }
     }
 }

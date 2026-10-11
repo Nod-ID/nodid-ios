@@ -4,7 +4,7 @@
 import Foundation
 import NFCPassportReader
 
-@_spi(Testing) public final class RealChip: ChipHandle {
+@_spi(Testing) @_spi(NodIDApp) public final class RealChip: ChipHandle {
     var sod: [UInt8]
     var dg1: [UInt8]
     public init(sod: [UInt8], dg1: [UInt8]) { self.sod = sod; self.dg1 = dg1 }
@@ -39,10 +39,21 @@ public final class RealServices: NodIDServices {
     @_spi(Testing) public var policyJSONForSelfTest: Data? { policyJSON }
     /// Stage timings of the last proof (seconds; no passport data).
     @_spi(Testing) public private(set) var lastTimings = ""
+    /// Set by the Nod ID app before `prove` (decision 56): its per-scope App Attest key, the handoff id and the read mode.
+    @_spi(NodIDApp) public var appSubmission: AppSubmission?
+    /// After a Nod ID app submission: the single-use return token and the outcome category the verifier holds until the host confirms.
+    @_spi(NodIDApp) public private(set) var lastReturnToken: String?
+    @_spi(NodIDApp) public private(set) var lastOutcome: String?
+    /// The session policy as fetched (no member data): the Nod ID app builds its request sheet from it.
+    @_spi(NodIDApp) public var policyData: Data? { policyJSON }
     /// For the face flow (decision 52): the DG2 binding (`hi`, `lo`, `r`) of the proof in progress, set once the passport proof is prepared and wiped
     /// when `prove` returns, however it returns. `faceBindingHandler` is called with it at that moment. Memory only; see `DG2Binding`.
     @_spi(Face) public private(set) var faceBinding: DG2Binding?
     @_spi(Face) public var faceBindingHandler: ((DG2Binding) -> Void)?
+    /// For the face flow: `C` of the passport proof just made (public value index 9 of the data-stage proof), available as soon as the proofs exist
+    /// and before the upload; wiped when `prove` returns. `faceCommitmentHandler` is called with it at that moment. Nil for proofs without a `C`.
+    @_spi(Face) public private(set) var faceCommitment: PassportCommitment?
+    @_spi(Face) public var faceCommitmentHandler: ((PassportCommitment) -> Void)?
 
     /// - Parameter resources: the folder holding the circuits, verification keys, `nodid.srs`, `served.json` and the `csca-*` files.
     ///   Default: the host app's bundle (the folder reference named in docs/INTEGRATION.md).
@@ -95,23 +106,22 @@ public final class RealServices: NodIDServices {
     /// Makes sure the proving resources are on the phone. Nothing to do when they are in the app. Safe to call from several places at once.
     public func resourcesReady(progress: @escaping (Int) -> Void) async throws {
         guard let cheap = resourceStore(allowExpensive: false), let any = resourceStore(allowExpensive: true) else { return }
-        if cheap.isComplete(tiers: baseTiers) { return }
-        NodTrace.log("resourcesReady: shared files missing, starting download")
+        if cheap.isComplete() { return }      // the whole set, the same for every member (docs/SECURITY.md, download rules 1, 2 and 4)
+        NodTrace.log("resourcesReady: files missing, starting download")
         PrefetchState.shared.stopWifiOnly()      // the member is waiting now: finish over any network (partial files are kept)
         let id = ResourceProgress.shared.observe(progress)
         defer { ResourceProgress.shared.remove(id) }
-        try await gate.run { try await any.ensure(tiers: baseTiers) { ResourceProgress.shared.publish($0) } }
+        try await gate.run { try await any.ensure(tiers: prefetchTiers) { ResourceProgress.shared.publish($0) } }
     }
 
-    /// The circuit files for the passport being verified (known once the chip has been read and the signature type is clear). Usually already
-    /// on the phone from the prefetch; otherwise only these files are fetched.
+    /// The circuit files for the passport being verified. They are already on the phone: `resourcesReady` fetched the whole set before the proof,
+    /// so nothing is requested here (a request that named this passport's circuits would reveal its algorithm and roughly its country,
+    /// docs/SECURITY.md download rule 2). A missing file is a technical error, never a download.
     func circuitsReady(names: [String]) async throws {
         guard let any = resourceStore(allowExpensive: true) else { return }
         let files = Set(names.map { $0 + ".json" })
-        if any.isComplete(names: files) { NodTrace.log("circuitsReady: \(files.count) circuit files already on the phone"); return }
-        NodTrace.log("circuitsReady: \(files.count) circuit files to get")
-        PrefetchState.shared.stopWifiOnly()
-        try await gate.run { try await any.ensure(names: files) { ResourceProgress.shared.publish($0) } }
+        guard any.isComplete(names: files) else { NodTrace.log("circuitsReady: \(files.count) circuit files missing"); throw ServicesError.missingResource }
+        NodTrace.log("circuitsReady: \(files.count) circuit files on the phone")
     }
 
     // MARK: placement
@@ -125,12 +135,15 @@ public final class RealServices: NodIDServices {
         guard status == 200, let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw ServicesError.session }
         policyJSON = data
         let flags = (j["checkFlags"] as? Int) ?? 0
-        return SessionPolicy(appName: (j["appName"] as? String) ?? "", accentHex: (j["accent"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "#1F3C7A",
+        var p = SessionPolicy(appName: (j["appName"] as? String) ?? "", accentHex: (j["accent"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "#1F3C7A",
                              minAge: (j["minAge"] as? Int) ?? 18, checkAge: flags & 2 != 0, checkExpiry: flags & 1 != 0, checkCountry: flags & 4 != 0,
                              helpURL: (j["helpUrl"] as? String).flatMap { URL(string: $0) },
                              offerDigitalId: (j["offerDigitalId"] as? Bool) ?? false, onePerPerson: (j["onePerPerson"] as? Bool) ?? false,
                              alternatives: ((j["alternatives"] as? [[String: Any]]) ?? []).compactMap { a in
                                  (a["title"] as? String).map { SessionPolicy.Alternative(title: $0, detail: (a["detail"] as? String) ?? "") } })
+        p.appHandoff = (j["appHandoff"] as? Bool) ?? false
+        p.freshRead = (j["freshRead"] as? Bool) ?? false
+        return p
     }
 
     // MARK: chip
@@ -185,12 +198,15 @@ public final class RealServices: NodIDServices {
         guard let c = chip as? RealChip, let pj = policyJSON else { throw ServicesError.session }
         // App Attest: the key and, the first time, its attestation are made beside the proving (about 1.5 s once per install).
         let nonce = ((try? JSONSerialization.jsonObject(with: pj)) as? [String: Any])?["nonce"].flatMap { $0 as? String }.flatMap(AttestBody.unhex)
-        let attestation = Task { if let n = nonce { await attest.prepare(nonce: n) } }
+        let app = appSubmission
+        let att = app?.attest ?? attest                     // the Nod ID app signs with its key for this app scope (decision 56)
+        lastReturnToken = nil; lastOutcome = nil
+        let attestation = Task { if let n = nonce { await att.prepare(nonce: n) } }
         onStep(.passportRead)
         let ps: ProofSession
         do { ps = try ProofSession(policyJson: pj, sod: Data(c.sod), dg1: Data(c.dg1)) } catch { c.wipe(); throw error }
         c.wipe()                                           // the Rust session holds the only copy now
-        defer { ps.wipe(); faceBinding?.wipe(); faceBinding = nil }
+        defer { ps.wipe(); faceBinding?.wipe(); faceBinding = nil; faceCommitment?.wipe(); faceCommitment = nil }
         try Task.checkCancellation()
 
         onStep(.checkingRules)
@@ -240,19 +256,33 @@ public final class RealServices: NodIDServices {
         lastTimings = String(format: "swift prove call %.2f s; ", CFAbsoluteTimeGetCurrent() - tProve) + ps.timings()
         try Task.checkCancellation()
         proofObserver?(body)
+        // The data-stage proof is the last one (CSCA stage first, then the linked proof or stage B).
+        if let last = AttestBody.parse(body)?.proofs.last?.proof, let c = PassportCommitment.from(proof: last) {
+            faceCommitment = c
+            faceCommitmentHandler?(c)
+        }
 
         _ = await attestation.value
         var signed = body
         if let n = nonce, let parts = AttestBody.parse(body) {
-            let payload = await attest.sign(nonce: n, path: parts.path, proofs: parts.proofs, sdk: NodIDVersion.sdk)
+            let payload: AttestPayload?
+            if let app, let h = AttestBody.unhex(app.handoffId), h.count == 16 {
+                let ph = AttestHash.proofHash(path: parts.path, proofs: parts.proofs)
+                payload = await att.sign(nonce: n, clientDataHash: AttestHash.appAssertionHash(nonce: n, proofHash: ph, handoffId: h, read: app.read, sdk: NodIDVersion.sdk))
+            } else {
+                payload = await att.sign(nonce: n, path: parts.path, proofs: parts.proofs, sdk: NodIDVersion.sdk)
+            }
             NodTrace.log("prove: app attest \(payload == nil ? "not available" : payload?.attestation == nil ? "assertion" : "attestation and assertion")")
             signed = AttestBody.add(to: body, sdk: NodIDVersion.sdk, attest: payload)
+            if let app { signed = AttestBody.addHandoff(to: signed, handoffId: app.handoffId, read: app.read) }
         }
         let tUp = CFAbsoluteTimeGetCurrent()
         let (out, status) = try await post(api.appendingPathComponent("v1/sessions/\(sessionId)/proof"), body: Data(signed.utf8), type: "application/json")
         lastTimings += String(format: ", upload %.2f s (%d B)", CFAbsoluteTimeGetCurrent() - tUp, signed.utf8.count)
         guard status == 200, let j = try JSONSerialization.jsonObject(with: out) as? [String: Any], let outcome = j["outcome"] as? String else { throw ServicesError.badAnswer }
-        if outcome == "verified" { await attest.markAttested() }
+        lastReturnToken = j["returnToken"] as? String
+        lastOutcome = outcome
+        if outcome == "verified" { await att.markAttested() }
         return outcome == "verified" ? .verified(reference: RealServices.reference()) : .notVerified(.technical)
     }
 
@@ -277,6 +307,28 @@ public final class RealServices: NodIDServices {
         _ = try? await post(api.appendingPathComponent("v1/sessions/\(sessionId)/report"), body: body, type: "application/json")
     }
 
+    // MARK: handoff to the Nod ID app (decision 56, nodid-app docs/HANDOFF_PROTOCOL.md)
+    public func startHandoff(sessionId: String) async -> URL? {
+        guard let pj = policyJSON, let j = (try? JSONSerialization.jsonObject(with: pj)) as? [String: Any],
+              let n = (j["nonce"] as? String).flatMap(AttestBody.unhex) else { return nil }
+        let payload = await attest.sign(nonce: n, clientDataHash: AttestHash.handoffHash(nonce: n))
+        var body: [String: Any] = ["sdk": NodIDVersion.sdk]
+        if let a = payload { body["attest"] = AttestBody.object(a) }
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let (out, status) = try? await post(api.appendingPathComponent("v1/sessions/\(sessionId)/handoff"), body: data, type: "application/json"),
+              status == 200, let r = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any],
+              let link = (r["link"] as? String).flatMap(URL.init(string:)), link.scheme == "https", link.host == "nodid.app" else { return nil }
+        if payload?.attestation != nil { await attest.markAttested() }   // the verifier stored the key with this handoff
+        return link
+    }
+
+    public func confirmHandoff(sessionId: String, returnToken: String) async -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["returnToken": returnToken]),
+              let (out, status) = try? await post(api.appendingPathComponent("v1/sessions/\(sessionId)/confirm"), body: data, type: "application/json"),
+              status == 200, let r = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] else { return nil }
+        return r["outcome"] as? String
+    }
+
     private func get(_ url: URL) async throws -> (Data, Int) {
         var r = URLRequest(url: url); r.httpMethod = "GET"
         let (d, resp) = try await http.data(for: r)
@@ -290,9 +342,10 @@ public final class RealServices: NodIDServices {
 }
 
 
-/// What the first run needs for every passport, and what `prefetch()` and the flow's background start fetch ahead of time.
-let baseTiers: Set<String> = ["base"]
-let prefetchTiers: Set<String> = ["base", "common"]
+/// Every file of the release, the same for every member: what `prefetch()`, the flow's background start and `resourcesReady` fetch, whatever the
+/// passport. (The manifest still marks "common" and "extra" circuits; they are no longer fetched differently.)
+let baseTiers: Set<String> = ["base", "common", "extra"]
+let prefetchTiers: Set<String> = baseTiers
 
 /// Runs one download at a time: a second caller waits for the first and then checks again (the folder is complete, or it tries itself).
 actor ResourceGate {

@@ -1,6 +1,8 @@
 # Nod ID iOS SDK: integrate in an iOS app (about an hour)
 
 Your app shows one sheet. The member's iPhone reads the passport chip and makes the proof. Your backend gets yes/no and a person code. You never receive an ID.
+
+**Want to see it work first?** Test mode needs no backend, no iPhone and no passport: add the package, then `try await NodID.verify(key: "nod_pk_test_...")` in the Simulator (Apple silicon Mac). Results are marked `mode: "test"`, `assurance: "test"` and never count as live. See the [quickstart](QUICKSTART.md). Test mode is Debug-only: a Release build has no test engine and returns `technicalError` for a test key. The rest of this page is the live setup.
 Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator), a Nod ID app key from us. A working example is in `sdk-ios/Sample/`.
 
 **1. Add the package.** Xcode, File > Add Package Dependencies, enter `https://github.com/Nod-ID/nodid-ios`, version rule "Exact" or "Up to next minor" from the release you were given, product **NodIDKit**, then `import NodIDKit`. The Rust proving core comes as a prebuilt binary (checked against a checksum in `Package.swift`). (Working in the Nod ID repository itself: add the local folder `sdk-ios/NodIDKit` and run `scripts/sdk-package.sh` once.)
@@ -9,7 +11,7 @@ Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator
 - Signing & Capabilities: add **Near Field Communication Tag Reading**. Entitlement `com.apple.developer.nfc.readersession.formats` = `TAG`.
 - Info.plist: `NFCReaderUsageDescription`, `NSCameraUsageDescription` (your own words, say it stays on the phone), and `com.apple.developer.nfc.readersession.iso7816.select-identifiers` = `A0000002471001`, `A0000002472001`, `00000000000000`.
 
-**3. Proving resources (circuits, keys, SRS, CSCA files).** Release builds of the package download what a member's passport needs once, into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. Files come from `nodid.app/sdk/<version>/` and, if that is unreachable, from the GitHub release. Up to four files download at once, and a stopped download continues where it stopped. The shared files (SRS, keys, CSCA data) are about 34 MB; each passport then needs only its own two or three circuits (4 to 15 MB), so a typical first run is about 40 MB, not the full 135 MB set. Nothing about the member is uploaded.
+**3. Proving resources (circuits, keys, SRS, CSCA files).** Release builds of the package download the proving files once, into the app's Application Support folder (not backed up). Every file is checked against a manifest whose SHA-256 is built into the SDK release, so the download host cannot change what runs. Files come from `nodid.app/sdk/<version>/` and, if that is unreachable, from the GitHub release. Up to four files download at once, and a stopped download continues where it stopped. The whole set is about 138 MB (the SRS, keys and CSCA data are about 34 MB; the circuits the rest), fetched once for every member whatever their passport, because a download that depended on the passport would reveal where it came from. Nothing about the member is uploaded.
 
 **Call `NodID.prefetch()` at app launch** so the files are ready before a member ever opens the flow:
 ```swift
@@ -17,7 +19,7 @@ Needs: Xcode 16+, iOS 17+, a **real iPhone** (NFC does not work in the simulator
 NodID.prefetch()                      // waits for Wi-Fi (default)
 // NodID.prefetch(allowCellular: true) // also over mobile data
 ```
-It returns at once and downloads in the background: the shared files plus the circuits most passports use (P-256 and RSA-2048), about 46 MB. A passport that needs a different circuit fetches just that one when it is scanned (a few MB). It does nothing when the files are already on the phone. If the app is closed first, the next launch continues. If a member opens the flow before it finishes, the flow completes the download over any network and shows "Getting ready for the first time" with a percentage that follows the bytes. Without `prefetch()`, the flow starts the download when it opens (Wi-Fi only until the proof needs it).
+It returns at once and downloads in the background: the whole set of circuits, keys and shared files, about 138 MB, the same for every member. (Earlier releases fetched only the circuits a scanned passport needed; that request pattern could hint at the passport's country, so the SDK now never requests anything that depends on the passport.) It does nothing when the files are already on the phone. If the app is closed first, the next launch continues. If a member opens the flow before it finishes, the flow completes the download over any network and shows "Getting ready for the first time" with a percentage that follows the bytes. Without `prefetch()`, the flow starts the download when it opens (Wi-Fi only until the proof needs it).
 
 To ship the files inside your app instead (no download), add the resources folder from the release to your app target as a **group**, not a folder reference, so the files sit flat; or pass `RealServices(resources: url)`. Development builds of the package (this repository) expect the bundled folder.
 
@@ -51,7 +53,7 @@ The app learns only the outcome. Reasons (under age, country, expired, already u
 ```
 GET https://api.nodid.app/v1/sessions/<sessionId>/result    Authorization: Bearer <your secret key>
 -> {"outcome":"verified","assurance":"substantial","unique":true,"personCode":"...","method":"passport_nfc",
-    "versions":{"circuit":"...","vk":"...","dscTree":"...","sdk":"0.3.0"}}     (202 while pending)
+    "versions":{"circuit":"...","vk":"...","dscTree":"...","sdk":"0.4.0"}}     (202 while pending)
 ```
 - `outcome`: `verified`, `not_verified`, `cancelled` or `technical_error`.
 - `assurance`: how sure the method makes us. `substantial` for a passport proof today; `high` (passport and face match) and `basic` (an OS age signal or estimation) come with those methods. Only present when verified.
@@ -73,6 +75,15 @@ GET https://api.nodid.app/v1/sessions/<sessionId>/result    Authorization: Beare
 - The code **changes** when the name on the passport changes (marriage, legal change, different spelling or transliteration, a middle name added or dropped) or the nationality changes. A renewed passport with the same details gives the same code. Someone holding passports from two countries gets two codes.
 - **Re-verify and link** (for a name change, or a second passport): let a signed-in member verify again from inside their account, and when the new code differs from the one you stored for them, store it as a second code for the same member instead of treating it as a new person. Do this only from an authenticated session, and still route a code that matches a *different* member to support.
 - Store person codes like any other personal data (they identify a person within your app). They are never linkable to another customer's.
+
+## Handoff to the Nod ID app (optional, off until you register a return link)
+When your app has a return link registered and allows the Nod ID app, and the Nod ID app is installed on the member's phone, the sheet hands the verification to it (an App Attest assertion over the session, then `https://nodid.app/r#...`). The Nod ID app proves and returns to your app with a single-use token. If it is not installed, or you have no return link, the usual flow runs. Nothing about the passport crosses to your app either way.
+
+Your app only needs one line to receive the return, and only once you register a link (the dashboard setting is not live yet, so today this does nothing):
+```swift
+.onOpenURL { url in NodID.handle(url) }   // true when it was the return for the verification on screen
+```
+Decision 56 in `docs/DECISIONS.md` has the rules (a stored-chip read is marked `method: "passport_stored"`; set `freshRead` on the session to require a chip read now).
 
 ## Licence
 Apache-2.0 (see LICENSE and NOTICE). Third-party components are listed in `legal/THIRD_PARTY_LICENSES.md`. Pilot software: external audit pending; country coverage is partial.

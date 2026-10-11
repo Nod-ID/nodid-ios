@@ -256,7 +256,7 @@ private final class ChunkReceiver: NSObject, URLSessionDataDelegate, @unchecked 
 
 /// Set by the release script (`scripts/sdk-resources.sh`) when it prepares a download release; nil in development builds.
 enum PinnedResources {
-    static let manifestSHA256: String? = "b29493caa49f1dc944abeed3cfe6f9aaf0bfe96545070ad9f4bebb3690331edd"
-    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.3.0/")
-    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.3.0/")!]
+    static let manifestSHA256: String? = "2afb0428e010af44124c588119820918c85f078c51998297a8baa8b6b7806580"
+    static let baseURL: URL? = URL(string: "https://nodid.app/sdk/0.4.0/")
+    static let fallbackURLs: [URL] = [URL(string: "https://github.com/Nod-ID/nodid-ios/releases/download/0.4.0/")!]
 }

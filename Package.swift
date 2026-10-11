@@ -12,7 +12,7 @@ let package = Package(
         .package(url: "https://github.com/AndyQ/NFCPassportReader", exact: "2.3.3"),
     ],
     targets: [
-        .binaryTarget(name: "MoproBindings", url: "https://github.com/Nod-ID/nodid-ios/releases/download/0.3.0/MoproBindings.xcframework.zip", checksum: "473f8c2029cf69a8d5e75023fa3979fe4121b8b22d0efa8eff3b03bc8764df4d"),
+        .binaryTarget(name: "MoproBindings", url: "https://github.com/Nod-ID/nodid-ios/releases/download/0.4.0/MoproBindings.xcframework.zip", checksum: "30a767e5c3772da1ae148fbd6ee83c64ec4b7dbda48bd21f6c0e1f11dbec8774"),
         .target(
             name: "NodIDKit",
             dependencies: ["MoproBindings", .product(name: "NFCPassportReader", package: "NFCPassportReader")],
